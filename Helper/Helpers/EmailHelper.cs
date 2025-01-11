@@ -29,7 +29,7 @@ public class EmailService(ILogger logger, IConfiguration configuration)
                 Body = new TextPart("html") { Text = body },
                 Subject = subject
             };
-            message.From.Add(new MailboxAddress("Albayan system", credentials.Email));
+            message.From.Add(new MailboxAddress("system", credentials.Email));
             message.To.Add(new MailboxAddress(to, to));
 
             using SmtpClient client = new();
