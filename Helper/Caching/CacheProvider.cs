@@ -9,7 +9,7 @@ namespace Helper.Caching;
 
 public class CacheProvider
 {
-    private static readonly Lazy<IMemoryCache> _cache = new(() => new MemoryCache(new MemoryCacheOptions()));
+    private static readonly MemoryCache _cache = new (new MemoryCacheOptions());
     private static readonly ConcurrentDictionary<string, HashSet<string>> CacheGroups = new();
 
     /// <summary>
@@ -17,8 +17,7 @@ public class CacheProvider
     /// so if we changed the permissions we must clear its cache group with both Roles and Users
     /// </summary>
     private static readonly ReadOnlyDictionary<string, List<string>> RelatedCacheGroups = new(new Dictionary<string, List<string>>() { });
-
-    public static IMemoryCache Instance => _cache.Value;
+    
 
 
     /// <summary>
@@ -33,7 +32,7 @@ public class CacheProvider
     {
         var cacheGroup = CacheGroupName(cacheType);
         // key = BitConverter.ToString(MD5.HashData(Encoding.ASCII.GetBytes(key)));
-        if (!Instance.TryGetValue(key, out T? cacheEntry))
+        if (!_cache.TryGetValue(key, out T? cacheEntry))
         {
             // Item not in cache, so create it
             cacheEntry = cacheBuilderFunction();
@@ -43,7 +42,7 @@ public class CacheProvider
                                         .SetSlidingExpiration(TimeSpan.FromMinutes(minutes))
                                         .SetAbsoluteExpiration(TimeSpan.FromMinutes(minutes + minutes / 3));
 
-            Instance.Set(key, cacheEntry, cacheEntryOptions);
+            _cache.Set(key, cacheEntry, cacheEntryOptions);
             if (!string.IsNullOrEmpty(cacheGroup))
                 CacheGroups.AddOrUpdate(cacheGroup, [key], (k, v) => { v.Add(key); return v; });
         }
@@ -54,7 +53,7 @@ public class CacheProvider
     {
         var cacheGroup = CacheGroupName(cacheType);
         // key = BitConverter.ToString(MD5.HashData(Encoding.ASCII.GetBytes(key)));
-        if (!Instance.TryGetValue(key, out T? cacheEntry))
+        if (!_cache.TryGetValue(key, out T? cacheEntry))
         {
             // Item not in cache, so create it
             cacheEntry = await cacheBuilderFunction();
@@ -64,7 +63,7 @@ public class CacheProvider
                                         .SetSlidingExpiration(TimeSpan.FromMinutes(minutes))
                                         .SetAbsoluteExpiration(TimeSpan.FromMinutes(minutes + minutes / 3));
 
-            Instance.Set(key, cacheEntry, cacheEntryOptions);
+            _cache.Set(key, cacheEntry, cacheEntryOptions);
             if (!string.IsNullOrEmpty(cacheGroup))
                 CacheGroups.AddOrUpdate(cacheGroup, [key], (k, v) => { v.Add(key); return v; });
         }
@@ -77,7 +76,7 @@ public class CacheProvider
     /// <param name="key">The key that will be deleted</param>
     public static void ClearCacheKey(string key)
     {
-        Instance.Remove(key);
+        _cache.Remove(key);
     }
 
     /// <summary>
@@ -203,10 +202,10 @@ public class CacheProvider
 
     public static object? GetCachedValue(string key)
     {
-        Instance.TryGetValue(key, out var cacheEntry);
+        _cache.TryGetValue(key, out var cacheEntry);
         return cacheEntry;
     }
 
-    public static void SetCachedValue(string key, string value) => Instance.Set(key, value);
+    public static void SetCachedValue(string key, string value) => _cache.Set(key, value);
     static string CacheGroupName(Type? cacheGroup) => cacheGroup?.Name ?? "";
 }

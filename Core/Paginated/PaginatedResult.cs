@@ -1,10 +1,24 @@
 ﻿namespace Core.Paginated;
 
-public class PaginatedResult<T>(List<T> list, int currentPage, int itemsPerPage, int totalItems)
+public class PaginatedResult<T>
 {
-    public List<T> Data { get; set; } = list;
-    public int CurrentPage { get; set; } = currentPage;
-    public int ItemsPerPage { get; set; } = itemsPerPage;
+    public List<T> Data { get; set; } = [];
+    public int CurrentPage { get; set; }
+    public int ItemsPerPage { get; set; }
+    public int TotalItems { get; set; }
     public int TotalPages => (int)Math.Ceiling(TotalItems / (double)ItemsPerPage);
-    public int TotalItems { get; set; } = totalItems;
+
+    // Empty constructor
+    public PaginatedResult()
+    {
+    }
+
+    // Constructor with parameters
+    public PaginatedResult(List<T> data, int currentPage, int itemsPerPage, int totalItems)
+    {
+        Data = data;
+        CurrentPage = currentPage;
+        ItemsPerPage = itemsPerPage;
+        TotalItems = totalItems;
+    }
 }

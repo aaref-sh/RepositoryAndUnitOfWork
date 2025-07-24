@@ -6,11 +6,16 @@ using System.Linq.Expressions;
 
 namespace Core.UOW;
 
-public interface IUnitOfWork<T> : IDisposable where T : class, IBaseEntity
+public interface IUnitOfWork : IDisposable
 {
     DbContext DbContext { get; }
-    IBaseRepository<T> Repository { get; }
+    IBaseRepository<TEntity> Repo<TEntity>() where TEntity : class, IBaseEntity;
     TRepo Get<TRepo>();
-    Task UpdateValue(Expression<Func<T, bool>> exp, Expression<Func<SetPropertyCalls<T>, SetPropertyCalls<T>>> setPropertyCalls);
     Task<int> SaveChangesAsync();
+}
+
+public interface IUnitOfWork<T> : IUnitOfWork where T : class, IBaseEntity
+{
+    IBaseRepository<T> Repository { get; }
+    Task UpdateValue(Expression<Func<T, bool>> exp, Expression<Func<SetPropertyCalls<T>, SetPropertyCalls<T>>> setPropertyCalls);
 }

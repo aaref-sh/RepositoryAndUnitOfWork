@@ -1,16 +1,19 @@
-﻿using Core.Exceptions;
+﻿using Core.BaseRepository;
 using Core.Entities;
+using Core.Exceptions;
 using Core.LocalizedProberty;
 using Core.Paginated;
 using Helper;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.EntityFrameworkCore;
 using System.ComponentModel.DataAnnotations;
+using System.Linq.Dynamic.Core;
+using System.Linq.Dynamic.Core.Exceptions;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text.Json;
-using Core.BaseRepository;
-using Microsoft.EntityFrameworkCore;
+using System.Text.RegularExpressions;
 
 namespace Core.Filters;
 
@@ -112,19 +115,57 @@ public class RequestOrdersModelBinder : IModelBinder
 
         return Task.CompletedTask;
     }
+} 
+
+public class RequestFilterDtoComparer : IEqualityComparer<RequestFilterDto>
+{
+    public bool Equals(RequestFilterDto x, RequestFilterDto y)
+    {
+        if (x == null || y == null) return false;
+        return x.Name == y.Name && Equals(x.Value, y.Value) && x.Operation == y.Operation;
+    }
+
+    public int GetHashCode(RequestFilterDto obj)
+    {
+        return HashCode.Combine(obj.Name, obj.Value, obj.Operation);
+    }
 }
 
-public class BaseFilter<TEntity> where TEntity : IBaseEntity
+public class RequestOrdersDtoComparer : IEqualityComparer<RequestOrdersDto>
 {
+    public bool Equals(RequestOrdersDto x, RequestOrdersDto y)
+    {
+        if (x == null || y == null) return false;
+        return x.Name == y.Name && x.Direction == y.Direction;
+    }
+
+    public int GetHashCode(RequestOrdersDto obj)
+    {
+        return HashCode.Combine(obj.Name, obj.Direction);
+    }
+}
+
+public class BaseFilter
+{
+    public bool Compare(BaseFilter other)
+    {
+        if (other == null) return false;
+
+        return RequestFilters.SequenceEqual(other.RequestFilters, new RequestFilterDtoComparer()) &&
+               RequestOrders.SequenceEqual(other.RequestOrders, new RequestOrdersDtoComparer()) &&
+               SearchQuery == other.SearchQuery &&
+               GetAll == other.GetAll &&
+               Page == other.Page &&
+               PerPage == other.PerPage;
+    }
 
     [ModelBinder(BinderType = typeof(RequestFiltersModelBinder))]
     public List<RequestFilterDto> RequestFilters { get; set; } = [];
 
-
     [ModelBinder(BinderType = typeof(RequestOrdersModelBinder))]
     public List<RequestOrdersDto> RequestOrders { get; set; } = [];
 
-    private string HeaderLang = "";
+    protected string HeaderLang = "";
     public string SearchQuery { get; set; } = "";
     public bool GetAll { get; set; } = false;
 
@@ -133,7 +174,10 @@ public class BaseFilter<TEntity> where TEntity : IBaseEntity
 
     [Range(1, 1000)]
     public int PerPage { get; set; } = 20;
+}
 
+public class BaseFilter<TEntity> : BaseFilter where TEntity : IBaseEntity
+{
     public int GetSkip() => (Page - 1) * PerPage;
     public Range GetRange() => ((Page - 1) * PerPage)..PerPage;
 
@@ -149,9 +193,9 @@ public class BaseFilter<TEntity> where TEntity : IBaseEntity
                 order.Direction == SortDirection.Asc ? ordered.ThenBy(exp) : ordered.ThenByDescending(exp) :
                 order.Direction == SortDirection.Asc ? lst.OrderBy(exp) : lst.OrderByDescending(exp);
         }
-        list = lst.ToList();
+        list = [.. lst];
         var count = list.Count;
-        if (!GetAll) list = list.GetRange(GetSkip(), PerPage);
+        if (!GetAll) list = [.. list.Skip(GetSkip()).Take(PerPage)];
 
         return new(list, Page, PerPage, count);
     }
@@ -235,7 +279,7 @@ public class BaseFilter<TEntity> where TEntity : IBaseEntity
                 AddFilter(lambdaExp);
             }
         }
-
+        RequestFilters.Clear();
     }
 
     private static Expression GetExpression(MemberExpression propertyExp, PropertyInfo propertyInfo, string? filter, string operation)
@@ -244,8 +288,88 @@ public class BaseFilter<TEntity> where TEntity : IBaseEntity
         {
             "in" or "notin" or "nin" => BaseFilter<TEntity>.GetListOperationExpression(propertyExp, propertyInfo, filter, operation),
             "any" or "nany" => GetListContainsAnyExpression(propertyExp, propertyInfo, filter, operation),
+            "contains" or "notcontains" or "startswith" or "endswith" => GetStringOperationExpression(propertyExp, propertyInfo, filter, operation),
+            "thesamedatewith" or "between" => GetDateOperationExpression(propertyExp, propertyInfo, filter, operation),
             _ => BaseFilter<TEntity>.GetOperationExpression(propertyExp, propertyInfo, filter, operation),
         };
+    }
+    private static BinaryExpression GetDateOperationExpression(MemberExpression propertyExp, PropertyInfo propertyInfo, string? filter, string operation)
+    {
+        object? filterValue1, filterValue2;
+        var targetType = propertyInfo.PropertyType;
+        bool isNullable = targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(Nullable<>);
+        Type nonNullableType = isNullable ? Nullable.GetUnderlyingType(targetType)! : targetType;
+        bool isDateTimeOffset = nonNullableType == typeof(DateTimeOffset);
+
+        switch (operation)
+        {
+            case "between":
+                var dates = filter!
+                    .Replace("\"", "")
+                    .Trim('[', ']')
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                filterValue1 = GetDateFilterValue(dates[0], nonNullableType);
+                filterValue2 = GetDateFilterValue(dates[1], nonNullableType);
+
+                var lowerBound = Expression.GreaterThanOrEqual(propertyExp, Expression.Constant(filterValue1, propertyExp.Type));
+                var upperBound = Expression.LessThanOrEqual(propertyExp, Expression.Constant(filterValue2, propertyExp.Type));
+                return Expression.AndAlso(lowerBound, upperBound);
+
+            case "thesamedatewith":
+                filterValue1 = GetDateFilterValue(filter, nonNullableType);
+                if (isNullable)
+                {
+                    var hasValueExp = Expression.Property(propertyExp, "HasValue");
+                    var valueExp = Expression.Property(propertyExp, "Value");
+                    var equalExp = isDateTimeOffset
+                        ? Expression.Equal(Expression.Property(valueExp, "Date"), Expression.Constant(((DateTimeOffset)filterValue1).Date))
+                        : Expression.Equal(valueExp, Expression.Constant(filterValue1, propertyExp.Type));
+                    return Expression.AndAlso(hasValueExp, equalExp);
+                }
+                else
+                {
+                    return isDateTimeOffset
+                        ? Expression.Equal(Expression.Property(propertyExp, "Date"), Expression.Constant(((DateTimeOffset)filterValue1).Date))
+                        : Expression.Equal(propertyExp,Expression.Constant(filterValue1, propertyExp.Type));
+                }
+
+            default:
+                throw new BaseException(System.Net.HttpStatusCode.UnprocessableEntity, $"Invalid date operation: {operation}");
+        }
+    }
+
+    private static Expression GetStringOperationExpression(MemberExpression propertyExp, PropertyInfo propertyInfo, string? filter, string operation)
+    {
+        if (filter == null)
+        {
+            // If filter is null, return false expression (no match)
+            return Expression.Constant(false);
+        }
+
+        var filterExp = Expression.Constant(filter, typeof(string));
+
+        var notNullExp = Expression.NotEqual(propertyExp, Expression.Constant(null, typeof(string)));
+
+        // MethodInfo for string methods
+        MethodInfo? method = operation switch
+        {
+            "contains" or "notcontains" => typeof(string).GetMethod(nameof(string.Contains), [typeof(string)]),
+            "startswith" => typeof(string).GetMethod(nameof(string.StartsWith), new[] { typeof(string) }),
+            "endswith" => typeof(string).GetMethod(nameof(string.EndsWith), new[] { typeof(string) }),
+            _ => null
+        } ?? throw new BaseException(System.Net.HttpStatusCode.UnprocessableEntity, $"Invalid string operation: {operation}");
+
+        // Call expression: propertyExp.Method(filter)
+        Expression callExp = Expression.Call(propertyExp, method, filterExp);
+
+        // For "notcontains", negate the call expression
+        if (operation == "notcontains")
+        {
+            callExp = Expression.Not(callExp);
+        }
+
+        // Combine null check and call expression: propertyExp != null && propertyExp.Method(filter)
+        return Expression.AndAlso(notNullExp, callExp);
     }
 
     private static Expression GetListContainsAnyExpression(MemberExpression propertyExp, PropertyInfo propertyInfo, string? filter, string operation)
@@ -304,7 +428,7 @@ public class BaseFilter<TEntity> where TEntity : IBaseEntity
         var targetType = propertyInfo.PropertyType;
         bool isNullable = targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(Nullable<>);
         Type nonNullableType = (isNullable ? Nullable.GetUnderlyingType(targetType) : targetType)!;
-        Type nullableType = isNullable ? propertyExp.Type : typeof(Nullable<>).MakeGenericType(propertyExp.Type);
+        Type nullableType = isNullable || propertyExp.Type == typeof(string) ? propertyExp.Type : typeof(Nullable<>).MakeGenericType(propertyExp.Type);
 
         try
         {
@@ -313,6 +437,8 @@ public class BaseFilter<TEntity> where TEntity : IBaseEntity
                 filterValue = filter != null ? Enum.Parse(propertyInfo.PropertyType, filter) : null;
             else if (nonNullableType.IsEnum)
                 filterValue = filter != null ? Enum.Parse(nonNullableType, filter) : null;
+            else if (nonNullableType.In([typeof(DateOnly), typeof(DateTime), typeof(DateTimeOffset)]))
+                filterValue = GetDateFilterValue(filter, nonNullableType);
             else
                 filterValue = filter == null ? null : Convert.ChangeType(filter, nonNullableType);
         }
@@ -329,21 +455,31 @@ public class BaseFilter<TEntity> where TEntity : IBaseEntity
 
         return operation switch
         {
-            "eq" or "equal" => filter == null ?
+            "eq" or "equal" or "equals" => filter == null ?
                  Expression.Equal(Expression.Convert(propertyExp, nullableType), Expression.Constant(null, nullableType))
                 : Expression.Equal(propertyExp, constantExp),
 
-            "ne" or "notequal" => filter == null ?
+            "ne" or "notequal" or "notequals" => filter == null ?
             Expression.NotEqual(Expression.Convert(propertyExp, nullableType),
                                 Expression.Constant(null, nullableType))
             : Expression.NotEqual(propertyExp, constantExp),
 
             "gt" or "greaterthan" => Expression.GreaterThan(propertyExp, constantExp),
             "lt" or "lessthan" => Expression.LessThan(propertyExp, constantExp),
-            "gte" or "greaterthanequal" => Expression.GreaterThanOrEqual(propertyExp, constantExp),
-            "lte" or "lessthanequal" => Expression.LessThanOrEqual(propertyExp, constantExp),
+            "gte" or "greaterthanequal" or "greaterthanorequals" => Expression.GreaterThanOrEqual(propertyExp, constantExp),
+            "lte" or "lessthanequal" or "lessthanorequals" => Expression.LessThanOrEqual(propertyExp, constantExp),
             _ => throw new BaseException(System.Net.HttpStatusCode.UnprocessableEntity, $"Invalid operation: {operation}"),
         };
+    }
+
+    private static object? GetDateFilterValue(string? filter, Type nonNullableType)
+    {
+        object? filterValue = null;
+        DateTimeOffset? val = filter == null ? null : DateTimeOffset.Parse(filter);
+        if (nonNullableType == typeof(DateTimeOffset)) filterValue = val;
+        if (nonNullableType == typeof(DateTime)) filterValue = val?.Date;
+        if (nonNullableType == typeof(DateOnly) && val.HasValue) filterValue = DateOnly.FromDateTime(val.Value.Date);
+        return filterValue;
     }
 
     private static Expression GetListOperationExpression(MemberExpression propertyExp, PropertyInfo propertyInfo, string? filter, string operation)
@@ -354,14 +490,16 @@ public class BaseFilter<TEntity> where TEntity : IBaseEntity
         {
             throw new BaseException(System.Net.HttpStatusCode.BadRequest, "Invalid value (null) with (in) filter operation");
         }
-
+        var targetType = propertyInfo.PropertyType;
+        bool isNullable = targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(Nullable<>);
+        Type nonNullableType = (isNullable ? Nullable.GetUnderlyingType(targetType) : targetType)!;
         // Convert filter values to correct type
         var filterValues = filters?.Select(value =>
         {
             if (propertyInfo.PropertyType.IsEnum)
                 return Enum.Parse(propertyInfo.PropertyType, value);
             else
-                return Convert.ChangeType(value, propertyInfo.PropertyType);
+                return Convert.ChangeType(value, nonNullableType);
         }).ToList();
 
         var filterValuesType = typeof(List<>).MakeGenericType(propertyInfo.PropertyType);
@@ -401,19 +539,15 @@ public class BaseFilter<TEntity> where TEntity : IBaseEntity
             Expression propertyExp = Expression.Property(parameterExp, propertyInfo);
 
             // Check if the property is of type BaseClass
-            if (typeof(BaseEntity).IsAssignableFrom(propertyInfo.PropertyType))
+            if (typeof(IBaseEntity).IsAssignableFrom(propertyInfo.PropertyType))
             {
-                // Access the Name property of LocalizedProperty and call getByLocale, handling null
                 var nameProperty = propertyInfo.PropertyType.GetProperty("Name");
                 var baseClassExp = Expression.Property(parameterExp, propertyInfo);
-                var nullCheck = Expression.NotEqual(baseClassExp, Expression.Constant(null, typeof(BaseEntity)));
+                var nullCheck = Expression.NotEqual(baseClassExp, Expression.Constant(null, typeof(IBaseEntity)));
                 var nameExp = Expression.Property(baseClassExp, nameProperty!);
 
-                var methodInfo = typeof(CustomDbFunctions).GetMethod(nameof(CustomDbFunctions.JsonbGetter))!;
-                var getByLocaleExp = Expression.Call(methodInfo, nameExp, Expression.Constant(HeaderLang));
-
                 // If baseClassExp is null, return a default value
-                propertyExp = Expression.Condition(nullCheck, getByLocaleExp, Expression.Constant(null, typeof(string)));
+                propertyExp = Expression.Condition(nullCheck, nameExp, Expression.Constant(null, typeof(string)));
             }
             else if (propertyInfo.PropertyType == typeof(LocalizedProperty))
             {
@@ -431,5 +565,66 @@ public class BaseFilter<TEntity> where TEntity : IBaseEntity
     protected void AddOrder(OrderItem<TEntity> order)
     {
         _orders.Add(order);
+    }
+}
+
+public static class LambdaParser
+{
+    static readonly ParsingConfig config = new();
+    public static Expression<Func<T, bool>> ParseLambda<T>(string lambdaString)
+    {
+        if (string.IsNullOrWhiteSpace(lambdaString))
+            throw new ArgumentException("Lambda expression string cannot be null or whitespace.", nameof(lambdaString));
+        try
+        {
+            return DynamicExpressionParser.ParseLambda<T, bool>(config, false, lambdaString);
+        }
+        catch (ParseException parseEx)
+        {
+            throw new ArgumentException(
+                $"Failed to parse lambda expression: '{lambdaString}'. Details: {parseEx.Message}", parseEx);
+        }
+        catch (Exception ex)
+        {
+            throw new Exception(
+                $"An error occurred while parsing lambda expression: '{lambdaString}'", ex);
+        }
+    }
+
+    public static Expression<Func<T, bool>> ParseLambda<T>(string lambdaString, IDictionary<string, object> externalParameters)
+    {
+        if (string.IsNullOrWhiteSpace(lambdaString))
+            throw new ArgumentException("Lambda expression string cannot be null or whitespace.", nameof(lambdaString));
+
+        if (externalParameters == null)
+            throw new ArgumentNullException(nameof(externalParameters), "External parameters dictionary cannot be null.");
+
+        try
+        {
+            Dictionary<string, int> paramMapping = [];
+            int index = 0;
+            foreach (var paramName in externalParameters.Keys) paramMapping[paramName] = index++;
+            
+            foreach (var kvp in paramMapping)
+            {
+                string paramName = kvp.Key;
+                int placeholderIndex = kvp.Value;
+                lambdaString = Regex.Replace(lambdaString, $@"\b{Regex.Escape(paramName)}\b", $"@{placeholderIndex}");
+            }
+
+            object[] externalValues = [.. paramMapping.OrderBy(kvp => kvp.Value).Select(kvp => externalParameters[kvp.Key])];
+
+            return DynamicExpressionParser.ParseLambda<T, bool>(config, false, lambdaString, externalValues);
+        }
+        catch (ParseException parseEx)
+        {
+            throw new ArgumentException(
+                $"Failed to parse lambda expression: '{lambdaString}' with external parameters. Details: {parseEx.Message}", parseEx);
+        }
+        catch (Exception ex)
+        {
+            throw new Exception(
+                $"An error occurred while parsing lambda expression: '{lambdaString}' with external parameters.", ex);
+        }
     }
 }
