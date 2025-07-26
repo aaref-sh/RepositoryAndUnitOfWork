@@ -43,27 +43,6 @@ internal class MappingProfile : Profile
             if (LiteDtoType != null)
                 CreateMap(entityType, LiteDtoType).IncludeAllDerived();
 
-            if (CreateDtoType != null)
-            {
-                if (UpdateDtoType != null) CreateMap(CreateDtoType, UpdateDtoType);
-                if (DetailsDtoType != null)
-                {
-                    var map = CreateMap(DetailsDtoType, CreateDtoType);
-                    map.AfterMap((src, dest) =>
-                    {
-                        foreach (var property in dest.GetType().GetProperties())
-                        {
-                            if (property.PropertyType.IsCollection() && property.Name.EndsWith("Id"))
-                            {
-                                List<long> ids = [];
-                                if (src.GetType().GetProperty(property.Name.Split("Id")[0])?.GetValue(src) is IEnumerable val)
-                                    foreach (var x in val) ids.Add(((BaseLiteDto)x).Id);
-                                property?.SetValue(dest, ids);
-                            }
-                        }
-                    });
-                }
-            }
         }
     }
 }
